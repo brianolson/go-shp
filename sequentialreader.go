@@ -23,6 +23,9 @@ type SequentialReader interface {
 	// encountered any errors, nil is returned for the Shape.
 	Shape() (int, Shape)
 
+	// ShapeType is the type of the current Shape returned by Shape()
+	ShapeType() ShapeType
+
 	// Attribute returns the value of the n-th attribute in the current row. If
 	// the SequentialReader encountered any errors, the empty string is
 	// returned.
@@ -63,6 +66,7 @@ type seqReader struct {
 	bbox         Box
 
 	shape      Shape
+	shapetype  ShapeType
 	num        int32
 	filelength int64
 
@@ -129,13 +133,12 @@ func (sr *seqReader) Next() bool {
 		return false
 	}
 	var num, size int32
-	var shapetype ShapeType
 
 	// read shape
 	er := &errReader{Reader: sr.shp}
 	binary.Read(er, binary.BigEndian, &num)
 	binary.Read(er, binary.BigEndian, &size)
-	binary.Read(er, binary.LittleEndian, &shapetype)
+	binary.Read(er, binary.LittleEndian, &sr.shapetype)
 
 	if er.e != nil {
 		if er.e != io.EOF {
@@ -147,7 +150,7 @@ func (sr *seqReader) Next() bool {
 	}
 	sr.num = num
 	var err error
-	sr.shape, err = newShape(shapetype)
+	sr.shape, err = newShape(sr.shapetype)
 	if err != nil {
 		sr.err = fmt.Errorf("Error decoding shape type: %v", err)
 		return false
@@ -186,6 +189,12 @@ func (sr *seqReader) Next() bool {
 // Shape implements a method of interface SequentialReader for seqReader.
 func (sr *seqReader) Shape() (int, Shape) {
 	return int(sr.num) - 1, sr.shape
+}
+
+// ShapeType is the type of the current Shape returned by Shape()
+// SequentialReader interface.
+func (sr *seqReader) ShapeType() ShapeType {
+	return sr.shapetype
 }
 
 // Attribute implements a method of interface SequentialReader for seqReader.
