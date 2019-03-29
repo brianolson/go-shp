@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"io"
 	"io/ioutil"
-	"math"
-	"strings"
+
+	dbf "github.com/brianolson/go-dbf"
 )
 
 // SequentialReader is the interface that allows reading shapes and attributes one after another. It also embeds io.Closer.
@@ -37,6 +37,8 @@ type SequentialReader interface {
 
 	// Err returns the last non-EOF error encountered.
 	Err() error
+
+	Db() *dbf.Dbf
 }
 
 // Attributes returns all attributes of the shape that sr was last advanced to.
@@ -70,11 +72,7 @@ type seqReader struct {
 	num        int32
 	filelength int64
 
-	dbfFields       []Field
-	dbfNumRecords   int32
-	dbfHeaderLength int16
-	dbfRecordLength int16
-	dbfRow          []byte
+	db *dbf.Dbf
 }
 
 // Read and parse headers in the Shapefile. This will fill out GeometryType,
@@ -102,29 +100,12 @@ func (sr *seqReader) readHeaders() {
 	}
 
 	// dbf header
-	er = &errReader{Reader: sr.dbf}
-	if sr.dbf == nil {
+	var err error
+	sr.db, err = dbf.NewDbf(sr.dbf)
+	if err != nil {
+		sr.err = fmt.Errorf("Error reading dbf: %v", err)
 		return
 	}
-	io.CopyN(ioutil.Discard, er, 4)
-	binary.Read(er, binary.LittleEndian, &sr.dbfNumRecords)
-	binary.Read(er, binary.LittleEndian, &sr.dbfHeaderLength)
-	binary.Read(er, binary.LittleEndian, &sr.dbfRecordLength)
-	io.CopyN(ioutil.Discard, er, 20) // skip padding
-	numFields := int(math.Floor(float64(sr.dbfHeaderLength-33) / 32.0))
-	sr.dbfFields = make([]Field, numFields)
-	binary.Read(er, binary.LittleEndian, &sr.dbfFields)
-	buf := make([]byte, 1)
-	er.Read(buf[:])
-	if er.e != nil {
-		sr.err = fmt.Errorf("Error when reading DBF header: %v", er.e)
-		return
-	}
-	if buf[0] != 0x0d {
-		sr.err = fmt.Errorf("Field descriptor array terminator not found")
-		return
-	}
-	sr.dbfRow = make([]byte, sr.dbfRecordLength)
 }
 
 // Next implements a method of interface SequentialReader for seqReader.
@@ -176,12 +157,12 @@ func (sr *seqReader) Next() bool {
 		sr.err = fmt.Errorf("Error when discarding bytes on sequential read: %v", ce)
 		return false
 	}
-	if _, err := io.ReadFull(sr.dbf, sr.dbfRow); err != nil {
-		sr.err = fmt.Errorf("Error when reading DBF row: %v", err)
-		return false
-	}
-	if sr.dbfRow[0] != 0x20 && sr.dbfRow[0] != 0x2a {
-		sr.err = fmt.Errorf("Attribute row %d starts with incorrect deletion indicator", num)
+	if sr.db != nil {
+		err := sr.db.Next()
+		if err != nil {
+			sr.err = fmt.Errorf("Error when reading DBF row: %v", err)
+			return false
+		}
 	}
 	return sr.err == nil
 }
@@ -202,13 +183,7 @@ func (sr *seqReader) Attribute(n int) string {
 	if sr.err != nil {
 		return ""
 	}
-	start := 1
-	f := 0
-	for ; f < n; f++ {
-		start += int(sr.dbfFields[f].Size)
-	}
-	s := string(sr.dbfRow[start : start+int(sr.dbfFields[f].Size)])
-	return strings.Trim(s, " ")
+	return sr.db.Fields[n].StringValue()
 }
 
 // Err returns the first non-EOF error that was encountered.
@@ -232,7 +207,20 @@ func (sr *seqReader) Close() error {
 
 // Fields returns a slice of the fields that are present in the DBF table.
 func (sr *seqReader) Fields() []Field {
-	return sr.dbfFields
+	out := make([]Field, len(sr.db.Fields))
+	for i, field := range sr.db.Fields {
+		out[i] = Field{
+			Fieldtype: byte(field.Type),
+			Size:      field.Length,
+			Precision: field.Count,
+		}
+		copy(out[i].Name[:], []byte(field.Name))
+	}
+	return out
+}
+
+func (sr *seqReader) Db() *dbf.Dbf {
+	return sr.db
 }
 
 // SequentialReaderFromExt returns a new SequentialReader that interprets shp
